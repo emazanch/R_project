@@ -1,0 +1,422 @@
+---
+title: "Exploratory Data Analysis for AirBnB"
+author: "Ekaterina Mazanchenko"
+created: "06/02/2021"
+last updated: "26/02/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Project description:
+
+Create a Shiny application that allows to explore the `AirBnB data (Paris data)`. A minimal application should contains:
+
+- Relationship between prices and apartment features,
+- Number of apartments per owner,
+- Renting price per city quarter ("arrondissements"),
+- Visit frequency of the different quarters according to time.
+
+The data are available at \textbf{l}
+<em>https://plmbox.math.cnrs.fr/f/6b0e16bbf4974b78ba01/?dl=1</em> 
+
+The `application` should be accompanied by a `R markdown document` explaining the different step of the analysis and providing some personal scientific comments on the data, based on statistical results.
+
+
+```{r message=FALSE} 
+#install.packages('dplyr')
+library(dplyr)
+load(url('https://plmbox.math.cnrs.fr/f/6b0e16bbf4974b78ba01/?dl=1'))
+```
+
+
+
+# Dataset observation:
+
+- L:
+The dataset describes AirBnB properties in Paris from 2009 to 2016, with 52725 items in 95 variables.
+```{r echo=FALSE}
+dim(L)
+```
+- R:
+The dataset contains visit records for properties from L.
+```{r echo=FALSE}
+dim(R)
+```
+
+- Variables type:
+```{r echo=FALSE}
+table(vapply(L, class, ''))
+```
+
+
+
+# Data cleaning:
+
+## Missing values:
+
+```{r}
+#install.packages(visdat)
+#install.packages(naniar)
+library(visdat)
+library(naniar)
+```
+
+```{r}
+vis_miss(L, warn_large_data = FALSE)
+```
+
+Number of missing values in L:
+```{r echo=FALSE}
+sum(is.na(L))
+```
+
+```{r}
+miss_var_summary(L)
+```
+We can delete first three variables with more than 95% missing values. 
+8 columns of reviews each contain about 70% of missing data. 
+
+```{r}
+sum(is.na(L$review_scores_rating))
+```
+What is `r round(sum(is.na(L$review_scores_rating))/length(L$review_scores_rating)*100, digits=2)`% of the variable data. I'll keep one of review_scores, `review_scores_rating` for complementary information.
+
+
+## Variables summary:
+
+We can explore variables properties.
+```{r}
+levels(L$neighbourhood_cleansed)
+```
+
+```{r}
+levels(L$experiences_offered)
+```
+
+```{r}
+no_prop_types <- L %>% count(property_type)
+no_prop_types = arrange(no_prop_types, desc(n))
+no_prop_types
+```
+
+```{r echo=FALSE}
+sum <- 0
+for (i in 2:length(no_prop_types$n)){
+  sum <- sum + no_prop_types[i,2]
+}
+top_prop <- cbind(no_prop_types[1,2], sum)
+
+pie(top_prop, labels =c('Apartements', 'All the rest'), col = c('pink','lightgreen'),
+    main = 'Proportion of properties')
+```
+
+Apartments represents `r round(no_prop_types[1,2]/length(L$id)*100, digits=2)`% of all properties on the market.
+
+```{r}
+summary(L$accommodates)
+```
+
+```{r}
+L %>% count(bed_type)
+```
+
+```{r}
+levels(L$cancellation_policy)
+```
+
+
+## Deleting non-essential or not-useful columns:
+
+```{r}
+L_filtered <- select(L, id, host_id, host_name, name, listing_url, street, neighbourhood_cleansed, zipcode, latitude, longitude, property_type, room_type, accommodates, bedrooms, bathrooms, beds, bed_type, price, weekly_price, guests_included, availability_30, review_scores_rating, cancellation_policy)
+```
+
+Redused dataset dimentions:
+```{r echo=FALSE}
+dim(L_filtered)
+```
+
+
+## Cleaning unpropre value types:
+
+```{r warning=FALSE}
+L_filtered$bathrooms <- as.integer(L_filtered$bathrooms)
+L_filtered$price <- as.numeric(gsub('\\$|,', '', L_filtered$price))
+L_filtered$weekly_price <- as.numeric(gsub('\\$|,', '', L_filtered$weekly_price))
+L_filtered$zipcode <- as.numeric(as.character(L_filtered$zipcode))
+```
+
+```{r}
+sum(is.na(L_filtered$weekly_price))/length(L_filtered$weekly_price)*100
+```
+
+
+# For future map, it can be useful to group apartments by districts:
+
+```{r}
+L_filtered %>% count(zipcode)%>%
+  head(20)
+```
+
+Actually missing:
+```{r echo=FALSE}
+sum(is.na(L_filtered$zipcode))
+```
+`r round(sum(is.na(L_filtered$zipcode))/length(L_filtered$zipcode)*100, digits=2)`% of data.
+
+
+## Zipcode replacement by district (`arrondissements`):
+
+I consider last 2 digits in 75XXX code to be a Paris intra muros district, and first 2 in 9XXXX for suburb area.
+```{r}
+arr <- {}
+for (i in 1:length(L_filtered$zipcode)){
+  if (!is.na(L_filtered$zipcode[i])){
+    if ((L_filtered$zipcode[i] > 75000) & (L_filtered$zipcode[i] <= 75120)){
+      arr[i] <- L_filtered$zipcode[i] - round(L_filtered$zipcode[i], -2)
+    } else if ((L_filtered$zipcode[i] > 90000) & (L_filtered$zipcode[i] <= 99000)){
+       arr[i] <- L_filtered$zipcode[i]%/%1000
+    }   
+  }
+}
+L_filtered <- cbind(L_filtered,arr)
+L_filtered <- L_filtered[,c(1:8,24,9:23)]
+```
+
+After treatment:
+```{r}
+L_filtered %>% count(arr)
+```
+
+New missing data is: 
+```{r echo=FALSE}
+sum(is.na(arr))
+```
+What is `r round(sum(is.na(arr))/length(arr)*100, digits=2)`%. Several `NA` values were added due to their original format.
+We can try to fix it and to obtain initially missed districts by coordinates with `banR`library.
+
+
+## Temporary dataframe for missed districts:
+
+```{r}
+missed_arr = data.frame(matrix(ncol = 5, nrow=0))
+colnames(missed_arr) <- c('id','street','latitude', 'longitude', 'zipcode')
+
+for (i in 1:length(L_filtered$arr)){
+  if (is.na(L_filtered$arr[i])){
+    missed_arr <- rbind(missed_arr, L_filtered[i,c(1,6,10,11,8)])
+  }
+}
+```
+
+```{r include=FALSE}
+L_filtered <- subset(L_filtered, select= -8)
+```
+
+```{r}
+#install.packages(banR)
+#install.packages(stringr)
+library(banR)
+library(stringr)
+```
+
+
+## Extracting districts by coordinates with `banR`:
+
+```{r message=FALSE}
+arr_temp <- vector('list', length(missed_arr$zipcode))
+
+for (i in 1:length(missed_arr$zipcode)){
+  arr_temp[[i]] <- as.integer(str_extract(reverse_geocode(long =  missed_arr$longitude[i], 
+                                            lat = missed_arr$latitude[i])[11],'[[:digit:]]+'))
+arr2 <- as.data.frame(do.call(rbind, arr_temp))
+colnames(arr2) <- ('arr2')
+}
+```
+
+```{r include=FALSE}
+missed_arr <- cbind(missed_arr,arr2)
+missed_arr <- replace_with_na_at(missed_arr, .vars = 'arr2', condition = ~.x == 75)
+```
+
+```{r}
+for (i in 1:length(L_filtered$arr)){
+  if (is.na(L_filtered$arr[i])){
+    num <- L_filtered$id[i]
+    for (j in 1:length(missed_arr$arr2)){
+      if (missed_arr$id[j] == num){
+        L_filtered$arr[i] <- missed_arr$arr2[j]
+      }
+    }
+  }
+}
+```
+
+```{r}
+sum(is.na(L_filtered$arr))
+```
+We succeed to arrive to `r sum(is.na(L_filtered$arr))` NA from 531. The treatments by `banR` is heavy, so we can stop here with 0.03% of NA in order to not supercharged more calculations.
+
+
+
+# Statistics:
+
+
+## Number of apartments per owner:
+
+```{r}
+#install.packages('ggplot2')
+library(ggplot2)
+```
+
+There are 44874 unique hosts on the market.
+The summary about their properties:
+```{r message=FALSE}
+no_prop <- L %>% count(host_id) %>%
+           arrange(desc(n))
+
+numb_hosts <- L %>% count(host_id)%>%
+              count(n) %>%
+              arrange(n)
+
+colnames(numb_hosts) <- c('no_aparts', 'no_pers')
+head(numb_hosts, 10)
+```
+
+```{r}
+plot(x = numb_hosts$no_aparts, y = numb_hosts$no_pers*100/44874, main = 'Property pourcentage', xlab = 'No apartments', ylab = '% owners')
+```
+
+`r round(41562/44874, digits=3)*100`% of owners propose 1 apartment. 
+
+```{r}
+summary(numb_hosts$no_aparts)
+```
+
+```{r}
+ggplot(data = no_prop) + 
+  geom_point(aes(x = host_id, y = n)) +
+  ggtitle('Number of apartments by owner') + 
+  xlab('Hosts id') + 
+  ylab('Number of apartments')
+```
+
+
+## Relationship between prices and apartment features:
+
+```{r}
+L_filtered %>% count(price>1000)
+```
+Number of apartments exceed $1000 represents `r round(49/52725*100, digits=2)`% so to scale the plots below I will limit it to 1000.
+
+```{r warning=FALSE}
+ggplot(data = L_filtered) + 
+  geom_point(aes(x=accommodates, y=price, col=factor(arr))) + 
+  scale_x_continuous(breaks = seq(1,16,1)) + 
+  scale_y_continuous(breaks = seq(0,1000,100), limits = c(0,1000)) + 
+  ggtitle('Apartment price by accommodates') + 
+  xlab('Number of guests') + 
+  ylab('Price by night, $')
+```
+
+```{r warning=FALSE}
+ggplot(data = L_filtered) + 
+  geom_point(aes(x=bedrooms, y=price, col=factor(arr))) + 
+  scale_x_continuous(breaks = seq(0,10,1)) + 
+  scale_y_continuous(breaks = seq(0,1000,100), limits = c(0,1000)) + 
+  ggtitle('Apartment price by number of bedrooms') + 
+  xlab('Number of bedrooms') + 
+  ylab('Price by night, $')
+```
+
+## Renting price per city quarter ("arrondissements"):
+
+```{r warning=FALSE}
+ggplot(data = L_filtered) +
+  geom_boxplot(aes(x=arr, y=price, col=factor(arr))) + 
+  scale_x_continuous(breaks = seq(1,20,1), limits = c(0,21)) + 
+  scale_y_continuous(breaks = seq(0,300,50), limits = c(0,300)) + 
+  ggtitle('Price summary by district') + 
+  xlab('Arrondissements') + 
+  ylab('Price by night, $')
+```
+
+
+## Visit frequency of the different quarters according to time:
+
+```{r include=FALSE}
+str(R$date)
+```
+
+```{r}
+R$date <- as.Date(R$date, format = "%Y-%m-%d")
+class(R$date)
+```
+There are 663599 id listed in frequency table.
+Each apartment were listed `n` times:
+
+```{r}
+R %>% count(listing_id)%>%
+  arrange(listing_id) %>%
+  head(10)
+```
+
+Number of all listings by year and month:
+```{r}
+R %>% mutate(month = format(date, '%m'), year = format(date, '%Y')) %>%
+  count(year, month) %>%
+  head(20)
+```
+
+
+## Visit frequency all the time:
+
+```{r}
+ggplot(data=R) + 
+  geom_histogram(aes(x=date, y= ..density..), bins = 87, fill='pink') +
+  geom_density(aes(x=date), col='darkgreen') + 
+  ggtitle('Visits frequency') +
+  scale_x_date(date_breaks = '1 year')
+```
+
+
+## Visit frequency by districts by years:
+
+Dataframe L contains listings by dates but geolocation is in R, so we can join the two by inner join.
+```{r}
+L_join <- L_filtered %>% select(id, arr)
+R_join <- R
+colnames(R_join) <- c('id', 'date')
+
+joined <- inner_join(L_join, R_join, by = 'id')
+joined <- mutate(joined, month = format(date, '%m'), year = format(date, '%Y'))
+head(joined, 5)
+```
+
+
+```{r warning=FALSE}
+ggplot(data = joined) + 
+  geom_bar(aes(x = year, fill=factor(arr))) +
+  ggtitle('Visits frequency with districts repartition') +
+  ylim(c(0,2000))
+```
+
+```{r}
+# WTF ?!!
+sum(is.na(L_filtered$arr))
+sum(is.na(joined$arr))
+```
+
+
+```{r warning=FALSE}
+ggplot(data = joined) + 
+  geom_bar(aes(x = month, fill= factor(arr))) +
+  ggtitle('Visits frequency with districts repartition') +
+  ylim(c(0,2000)) +
+  facet_wrap(~year, nrow=4)
+```
+
+With the data we can't confirm visiting frequency on given month, but it is a tendency to choose suburb area with time what can be depending on price or on new disponibility.
